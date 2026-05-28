@@ -1,177 +1,172 @@
-# BM25 поиск по публикациям ЦБ РФ
+# BM25-поиск по каталогу данных ЦБ РФ
 
-Прототип полнотекстового поиска с лемматизацией русского языка. Без СУБД — источник правды лежит в `data/docs.jsonl` (append-only), а индекс держится в `data/index/` в виде numpy/scipy-массивов.
+Полнотекстовый поиск с лемматизацией русского языка. Без СУБД — источник правды в `data/docs.jsonl` (append-only), индекс в `data/index/` (numpy/scipy-массивы). Перенос в закрытый контур — копированием четырёх `.py` файлов и SQL.
 
-## Архитектура
+## Терминология
 
+| Термин | Что это | Источник |
+|---|---|---|
+| **Решение** (`decision`) | Набор данных каталога (один документ верхнего уровня) | `pub_report.csv` (локально) или `db/decisions.sql` (прод) |
+| **Атрибут** (`attribute`) | Поле/показатель внутри решения; в индексе хранится как группа из N подряд идущих атрибутов одного решения | `Показатели.csv` (локально) или `db/attributes.sql` (прод) |
+
+В индексе у каждого документа есть `kind` (`"decision"` либо `"attribute"`) и `pub_id` — идентификатор решения-владельца.
+
+## Холодный старт в контуре
+
+Что нужно физически: Python 3.9+, и в системе должны быть `numpy`, `scipy`, `razdel`, `pymorphy3` (с подключённым словарём `pymorphy3-dicts-ru`), `pyspark`.
+
+```bash
+# 1) Проверка окружения — реально пробуем тот функционал, который нужен коду.
+#    Если печатает «parse: кот OK» — всё на месте.
+python3 - <<'PY'
+import razdel, numpy, scipy, pyspark, pymorphy3, pymorphy3_dicts_ru
+from pymorphy3 import MorphAnalyzer
+m = MorphAnalyzer(path=pymorphy3_dicts_ru.get_path())
+print("parse:", m.parse("коты")[0].normal_form, "OK")
+PY
+
+# 2) Сборка индекса с нуля. Порядок не важен; решения и атрибуты живут в одном индексе.
+rm -rf data
+python3 add_doc.py db/decisions.sql                  # решения каталога
+python3 add_doc.py db/attributes.sql --group-size 5  # атрибуты решений (группы по 5)
+
+# 3) Проверка поиска.
+python3 query.py "инфляция"
+python3 query.py --like-pub 3571 --top-k 10
+
+# 4) (опционально) Coverage-анализ.
+python3 coverage.py 3571
 ```
-pub_report.csv  ──┐
-Показатели.csv  ──┤  add_doc.py  ──▶  data/docs.jsonl  (append-only, источник правды)
-                                              │
-                                              ▼
-                                  [add_doc.py пересобирает]
-                                              │
-                                              ▼
-                                     data/index/  (numpy-кэш)
-                                              │
-                                              ▼
-                                [query.py загружает в RAM]
-                                              │
-                                              ▼
-                                           поиск
-```
 
-- **Источник правды** — текстовый JSONL, в него только дописываем (одна запись = одна строка). Существующие записи никогда не меняются.
-- **Индекс** — numpy/scipy-кэш на диске. После каждого добавления документов аппендер пересобирает индекс с нуля по `docs.jsonl` и записывает в `data/index/`. Для десятков тысяч документов это секунды; рассинхронизации с источником правды не возникает по построению.
-- **Поиск** — `query.py` грузит numpy-массивы в память, формула BM25 — векторизованная по scipy.sparse.
+Если шаг 1 упал — увидите конкретную причину: либо отсутствует один из перечисленных импортов, либо `pymorphy3` не может прочитать словарь. Отдельный пакет `dawg-python` явно проверять не нужно: это транзитивная зависимость `pymorphy3`, и если `MorphAnalyzer.parse(...)` отрабатывает — pymorphy3 разберётся со своими внутренностями сам (там есть несколько fallback'ов).
 
-## Типы документов
+### Что создастся в процессе
 
-В одном индексе живут документы двух типов (поле `kind`):
+| Каталог/файл | Когда появляется | Что это |
+|---|---|---|
+| `data/docs.jsonl` | при первом `add_doc.py` | Append-only источник правды |
+| `data/index/` | при первом `add_doc.py` | Numpy/scipy-кэш индекса |
+| `output/coverage_*.json` | при `coverage.py` | Отчёт ранжирования |
 
-| `kind` | Источник | Уникальный ключ `doc_id` | Индексируемые поля |
-|---|---|---|---|
-| `publication` | `pub_report.csv` | `pub:<pub_id>` | `name + business_description + keywords` |
-| `element` | `Показатели.csv` | `el:<pub_id>#<row_idx>` | `report_name + name + description` |
+Все три каталога — в `.gitignore`, в репо не уезжают; пересобираются на той стороне с нуля.
 
-`pub_id` сохраняется в каждом документе как поле для связи с публикацией, но **не индексируется как текст** (это идентификатор, а не семантика). Список индексируемых полей по типу задан в `INDEX_FIELDS_BY_KIND` в [bm25_numpy.py](bm25_numpy.py) — это точка для правок при смене схемы CSV.
+## Холодный старт локально (для разработки, на CSV-данных)
 
-При поиске можно фильтровать по типу: `--kind publication` или `--kind element`.
-
-## Стек
-
-| Компонент | Версия | Лицензия | Назначение |
-|---|---|---|---|
-| [razdel](https://github.com/natasha/razdel) | 0.5.0 | MIT | Токенизация русского текста |
-| [pymorphy3](https://github.com/no-plagiarism/pymorphy3) | 2.0.2 | MIT | Словарная лемматизация (OpenCorpora) |
-| numpy | ≥1.26 | BSD | Численные массивы |
-| scipy | ≥1.11 | BSD | Разреженная term-doc матрица (CSR/CSC) |
-
-Все библиотеки чистый Python, без нейросетей и сетевых вызовов после установки.
-
-## Структура репозитория
-
-### Исходники
-
-| Файл | Назначение |
-|---|---|
-| [bm25_numpy.py](bm25_numpy.py) | Ядро. `BM25Index` (vocab, doc_ids, kinds, tf-CSR, doc_lens, df), `Searcher` с фильтром по `kind`, функции `build_from_documents` / `save_index` / `load_index` / `rebuild_and_save` / `open_searcher`, JSONL-хелперы. |
-| [add_doc.py](add_doc.py) | Аппендер. Принимает CSV (или JSONL), автоопределяет `kind` по схеме, нормализует записи (выставляет `doc_id`/`kind`/`pub_id`), дедуплицирует по `doc_id`, дописывает в `data/docs.jsonl`, пересобирает и сохраняет numpy-индекс. |
-| [query.py](query.py) | Поиск. Грузит индекс из `data/index/`, исполняет запросы. Поддерживает `--kind` и `--top-k`. |
-| [bm25_ru.py](bm25_ru.py) | Класс `Tokenizer` (razdel + pymorphy3 + кэш лемм), список `RU_STOPWORDS` и набор знаков пунктуации. |
-| [requirements.txt](requirements.txt) | Зависимости. |
-
-### Данные
-
-| Файл | Что внутри |
-|---|---|
-| [pub_report.csv](pub_report.csv) | 285 публикаций ЦБ РФ. Поля: `pub_id, name, business_description, keywords, ...`. UTF-8 с BOM. |
-| [Показатели.csv](Показатели.csv) | 16 068 показателей/измерений публикаций. Из них индексируем `pub_id, report_name, name, description`; остальные колонки игнорируются (схема может меняться). |
-| [pub_elements.csv](pub_elements.csv) | Старая версия `Показатели.csv`. Не используется. |
-| `data/docs.jsonl` | Источник правды. Одна запись = одна JSON-строка с полями `doc_id`, `kind`, `pub_id` и полезными для отображения данными. |
-
-### Артефакты numpy-индекса (`data/index/`, создаются `add_doc.py`)
-
-| Файл | Содержимое |
-|---|---|
-| `tf.npz` | `scipy.sparse.csr_matrix` формы `[N × V]` — частоты лемм по документам. |
-| `doc_lens.npy` | Длины документов в токенах, `int32[N]`. |
-| `df.npy` | Document frequency на термин, `int32[V]`. |
-| `vocab.json` | `{лемма: column_index}`. |
-| `doc_ids.json` | Список `doc_id` в порядке строк матрицы. |
-| `kinds.json` | Список `kind` параллельно `doc_ids` (для фильтрации в выдаче). |
-| `meta.json` | Версия индекса, N, размер словаря, avgdl, параметры BM25, поля по `kind`, разбивка по типам. |
-
-IDF не сохраняется — пересчитывается при загрузке (миллисекунды).
-
-## Установка
+В корне репо лежат тестовые CSV (`pub_report.csv`, `Показатели.csv`) — на них можно проверить весь пайплайн без Spark.
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+
+rm -rf data
+.venv/bin/python add_doc.py pub_report.csv                      # 285 решений
+.venv/bin/python add_doc.py Показатели.csv --group-size 5       # ~3 300 групп атрибутов
+.venv/bin/python query.py "инфляционные ожидания"
+.venv/bin/python query.py --like-pub "Аналитика/10"
+.venv/bin/python coverage.py "Аналитика/10"
 ```
 
-## Использование
+`kind` автоопределяется по составу колонок источника (CSV — по `business_description` vs `description`+`report_name`; SQL — по `descr`/`keywords` vs `col_descr`/`type`). При необходимости можно явно через `--kind decision|attribute`.
 
-### Полная сборка с нуля
+## Поиск
 
-```bash
-rm -rf data/                                      # если есть несовместимый старый индекс
-.venv/bin/python add_doc.py pub_report.csv        # 285 публикаций
-.venv/bin/python add_doc.py Показатели.csv        # 16 068 элементов
-```
+### По тексту
 
-После этого `data/docs.jsonl` содержит 16 353 записи, индекс — в `data/index/`.
-
-### Поиск
-
-Без фильтра (показатели и публикации в общем пуле):
 ```bash
 .venv/bin/python query.py "инфляционные ожидания населения"
+.venv/bin/python query.py --kind decision  "брокеры розничные инвесторы"
+.venv/bin/python query.py --kind attribute --top-k 10 "ОФЗ-ИН"
+.venv/bin/python query.py                                     # встроенный смоук-набор
 ```
 
-Только публикации:
-```bash
-.venv/bin/python query.py --kind publication "брокеры розничные инвесторы"
-```
+В выдаче префикс kind (`dec` / `att`), `pub_id` и заголовок. Для атрибутов через `::` дописывается `report_name` (имя родительского решения).
 
-Только конкретные показатели:
-```bash
-.venv/bin/python query.py --kind element --top-k 10 "ОФЗ-ИН"
-```
-
-Без аргументов — прогон встроенного смоук-набора.
-
-В выдаче префикс `[pub|...]` — публикация, `[ele|...]` — элемент; для элементов в заголовке через `::` дописывается `report_name :: name`.
-
-### Добавление новых данных
+### По решению (найти похожие)
 
 ```bash
-.venv/bin/python add_doc.py new_publications.csv          # автоопределит kind=publication
-.venv/bin/python add_doc.py new_indicators.csv --kind element  # явное указание
+.venv/bin/python query.py --like-pub 3571 --top-k 10
 ```
 
-Скрипт идемпотентен: повторно добавленные `doc_id` отфильтровываются, индекс не трогается, если новых записей нет.
+Берёт все атрибуты решения `3571`, склеивает в один большой запрос, маскирует само решение в выдаче, группирует результаты по `pub_id` — выдаёт ОДИН лучший документ на каждое соседнее решение. Используется как sanity-check «найди похожих».
 
-### Программный доступ
+### Фильтр по типу атрибута
 
-```python
-from pathlib import Path
-from bm25_numpy import open_searcher
-
-searcher = open_searcher(Path("data"))
-for score, doc in searcher.search("ОФЗ-ИН", top_k=5, kind="element"):
-    print(score, doc["doc_id"], doc.get("report_name"), "::", doc["name"])
+```bash
+.venv/bin/python query.py "инфляция" --search-among Показатель Измерение
 ```
 
-## Параметры и точки настройки
+Берёт только документы, у которых поле `type` содержит хотя бы одно из перечисленных значений (case-insensitive). Можно комбинировать с `--like-pub` и `--kind`:
 
-| Что | Где | По умолчанию |
+```bash
+.venv/bin/python query.py --like-pub 3571 --search-among Показатель
+```
+
+### Coverage-анализ
+
+«Какие решения покрывают атрибуты целевого?»
+
+```bash
+.venv/bin/python coverage.py 3571                    # дефолты: top-K=5, threshold=1.0, workers=20
+.venv/bin/python coverage.py 3571 --top-k 3 --threshold 1.5 --workers 8
+```
+
+Каждый атрибут решения `3571` голосует за решения, в которых нашлись похожие атрибуты. Голос распределяется пропорционально BM25-скору внутри top-K. Результат пишется в `output/coverage_<safe_pub_id>.json`.
+
+## Добавление новой колонки в индекс (расширение схемы)
+
+Главная инвариантность: **новая колонка в SQL/CSV автоматически попадает в индекс**.
+
+1. Дописываем колонку в `SELECT` (db/decisions.sql или db/attributes.sql) либо в CSV.
+2. `rm -rf data && python add_doc.py <источник>` — пересборка.
+3. Готово, новое поле теперь индексируется.
+
+Если новую колонку **не нужно** индексировать (например, числовой identifier или служебное поле) — допишите её имя в `INDEX_BLACKLIST` в [bm25/builder.py](bm25/builder.py). Это единственное место в Python, где может потребоваться правка.
+
+Сейчас в `INDEX_BLACKLIST` лежат: `id`, `owner`, `type`, `parent_dataset`, `frequency`, `first_timestamp`, `basis_document`, `comments`, плюс служебные поля документа (`doc_id`, `kind`, `pub_id`, `n_elements`, `element_names`).
+
+## Структура репозитория
+
+```
+bm25/                         ядро (пакет, импортируется как `import bm25`)
+  tokenizer.py                Tokenizer (razdel + pymorphy3 + стоп-слова)
+  index.py                    BM25Index + формула score()
+  builder.py                  Схема + нормализаторы + сборка индекса
+  storage.py                  Save/load индекса + LazyDocuments (lazy JSONL)
+  searcher.py                 Searcher + open_searcher / rebuild_and_save
+  db_source.py                Чтение SQL через Spark (lazy import pyspark)
+
+add_doc.py                    CLI: CSV/JSONL/SQL → инжест и пересборка индекса
+query.py                      CLI: поиск (text / --like-pub / --search-among)
+coverage.py                   CLI: анализ покрытия атрибутов
+
+db/
+  decisions.sql               Решения из БД (прод-аналог pub_report.csv)
+  attributes.sql              Атрибуты из БД (прод-аналог Показатели.csv)
+  database_description.txt    Схема таблиц источника, для справки
+
+data/                         (создаётся скриптами)
+  docs.jsonl                  Источник правды — append-only
+  index/                      Numpy/scipy-кэш индекса
+
+docs/
+  index_anatomy.md            Подробно: как устроен индекс изнутри
+
+pub_report.csv, Показатели.csv, pub_elements.csv  — локальные тестовые данные
+```
+
+## Параметры и тонкости
+
+| Что | Где задаётся | По умолчанию |
 |---|---|---|
-| Поля по типу документа | `INDEX_FIELDS_BY_KIND` в [bm25_numpy.py](bm25_numpy.py) | `publication: name+business_description+keywords`, `element: report_name+name+description` |
-| Какие колонки CSV сохранять в JSONL | `PUBLICATION_KEEP_FIELDS`, `ELEMENT_KEEP_FIELDS` в [add_doc.py](add_doc.py) | См. файл |
-| Стоп-слова | `RU_STOPWORDS` в [bm25_ru.py](bm25_ru.py) | Базовый русский служебный список |
-| Минимальная длина токена | `Tokenizer.min_len` | `2` |
-| Параметры BM25 | `DEFAULT_K1`, `DEFAULT_B` в [bm25_numpy.py](bm25_numpy.py) | `k1=1.5`, `b=0.75` |
+| Гиперпараметры BM25 (`k1`, `b`) | `DEFAULT_K1`, `DEFAULT_B` в `bm25/index.py` | 1.5 / 0.75 |
+| Минимальная длина токена | `Tokenizer.min_len` в `bm25/tokenizer.py` | 2 |
+| Стоп-слова | `RU_STOPWORDS` в `bm25/tokenizer.py` | базовый русский список |
+| Что не индексируется | `INDEX_BLACKLIST` в `bm25/builder.py` | служебные + id/owner/type/… |
+| Размер группы атрибутов | `--group-size N` в `add_doc.py` | 1 |
+| Threshold для coverage | `--threshold` в `coverage.py` | 1.0 |
+| Воркеры coverage | `--workers` в `coverage.py` | 20 (Linux fork) |
 
-После любого изменения индексируемых полей или стоп-слов нужно удалить `data/index/` и снова запустить аппендер на тех же CSV — индекс пересоберётся.
+## Где смотреть детали
 
-## Как добавить новый тип документа
-
-Пользовательский кейс: придёт ещё один CSV с другой схемой (например, «Документы»).
-
-1. В [bm25_numpy.py](bm25_numpy.py) добавить запись в `INDEX_FIELDS_BY_KIND`:
-   ```python
-   "document": ("title", "summary", "tags"),
-   ```
-2. В [add_doc.py](add_doc.py) дописать `normalize_document` и зарегистрировать в `NORMALIZERS`. По желанию — добавить ветку в `detect_kind` для автоопределения.
-3. Запустить `python add_doc.py new_file.csv --kind document`.
-
-Никаких изменений в `bm25_numpy.py` ниже верхней константы не нужно — пайплайн полей по `kind` сделан обобщённо.
-
-## Ограничения
-
-- Индекс полностью держится в памяти. На текущих 16 353 документах словарь 4 612 терминов — единицы МБ. Запас на десятки тысяч элементов есть.
-- Аппендер пересобирает индекс целиком с каждой партией. На текущих объёмах — ~2 с; если станет узким местом, добавим инкрементальное расширение vocab + `vstack` новых строк.
-- В общем пуле длинные публикации и короткие элементы — `avgdl ≈ 17` (тянут вниз 16 тыс. коротких элементов). BM25 нормализует это через `b`, но при необходимости тонкого контроля имеет смысл BM25F или раздельные индексы.
-- Pymorphy3 не знает совсем свежих неологизмов. Для лексики ЦБ покрытие хорошее, но при странной выдаче проверьте OOV.
+- **Архитектура индекса** (что в каждом файле `data/index/`, как устроены параллельные массивы, lazy-load документов, формула BM25): [docs/index_anatomy.md](docs/index_anatomy.md).
+- **Перенос в закрытый контур**: pyspark обычно уже есть; нужно убедиться, что доступны `razdel`, `pymorphy3`, `pymorphy3-dicts-ru`, `dawg-python`, `numpy`, `scipy`. Если чего-то нет — собрать оффлайн-bundle, см. историю проекта.

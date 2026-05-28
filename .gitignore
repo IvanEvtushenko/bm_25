@@ -1,16 +1,32 @@
-# Indexes — пересобираются из CSV скриптом add_doc.py
+# Артефакты работы — пересобираются скриптами add_doc.py / coverage.py
 data/
 index_data/
+output/
+logs/
+
+# Bundle для переноса (если когда-нибудь снова будем собирать)
+bundle/
 
 # Python
 __pycache__/
 *.py[cod]
 *.egg-info/
+.python-version
 
 # Virtualenv
 .venv/
 venv/
 env/
+arxiv/
+
+# Spark / Hive — оседают рядом при локальной отладке pyspark
+metastore_db/
+spark-warehouse/
+derby.log
+*.crc
+
+# Jupyter
+.ipynb_checkpoints/
 
 # OS
 .DS_Store
@@ -19,7 +35,10 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+.claude/
 *.swp
+*.swo
+*.iml
 
 # Tooling caches
 .pytest_cache/

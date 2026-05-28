@@ -1,0 +1,51 @@
+Объекты в схеме zp_dm_aso_ddpp_kdb:
+
+arch_datamap_stg_catalog_datasets — наборы данных
+
+  • ds_id — ИД набора данных
+  • data_status — статус набора данных, нужны наборы со статусом «Активный» или «Проектируется»
+  • ds_name — наименование набора данных
+  • ds_type — тип набора данных
+  • ds_descr — методологическое описание
+  • iportal_code — код витрины на Информпортале
+
+arch_datamap_stg_catalog_attr — атрибуты наборов данных (связь по ИД набора)
+
+arch_datamap_stg_iportal_dm — описание витрин на Информпортале (связь с наборами по коду витрины)
+
+  • dm_code — код витрины
+  • dm_name — наименование витрины
+
+arch_datamap_stg_iportal_dm_struct — описание структуры витрины на Информпортале (фактически атрибутный состав, связь по коду витрины)
+
+arch_datamap_fct_datasets_hier_flat — связи наборов данных
+
+  • ds_id — ИД набора данных
+  • ds_level_type — тип зависимости, должно быть равно «Источники»
+  • hier_level — уровень иерархии зависимостей, должно быть равно «1»
+  • ds_id_hier — ИД набора источника
+
+
+
+'''
+SELECT
+  ds_id AS id, -- int
+  ds_name AS name,
+  ds_descr AS descr,
+  keywords,
+  prod_facr_owner AS owner
+FROM arch_datamap_stg_catalog_datasets
+WHERE data_status = 'Активный'
+''' -- фактически "публикации"
+
+'''
+SELECT
+  ds.ds_id AS id, -- int
+  ds.prod_owner AS owner,
+  ds.ds_type AS type,
+  attr.attr_name AS name,
+  attr.attr_descr AS descrm
+FROM arch_datamap_stg_catalog_datasets AS ds
+  JOIN arch_datamap_stg_catalog_attr AS attr ON ds.ds_id = attr.ds_id
+WHERE ds.data_status = 'Активный'
+''' -- фактически "показатели"
