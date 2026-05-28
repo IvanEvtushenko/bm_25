@@ -12,10 +12,10 @@
 --   Чтобы новая колонка НЕ индексировалась — добавьте её имя в INDEX_BLACKLIST.
 
 SELECT
-  ds_id           AS id,
-  ds_name         AS name,
-  ds_descr        AS descr,
+  ds_id AS id,
+  ds_name AS name,
+  ds_descr AS descr,
   keywords,
   prod_facr_owner AS owner
-FROM arch_datamap_stg_catalog_datasets
+FROM zp_dm_aso_ddpp_kdb.arch_datamap_stg_catalog_datasets
 WHERE data_status = 'Активный'

@@ -16,13 +16,13 @@
 -- атрибуты одного решения шли подряд.
 
 SELECT
-  ds.ds_id        AS id,
-  ds.prod_owner   AS owner,
-  st.ds_type      AS type,
-  st.col_name     AS name,
-  st.col_descr    AS col_descr
-FROM arch_datamap_stg_catalog_datasets AS ds
-JOIN arch_datamap_stg_iportal_dm_struct AS st
-  ON ds.ds_name = st.dm_name
+  ds.ds_id AS id,
+  ds.prod_owner AS owner,
+  st.ds_type AS type,
+  st.col_name AS name,
+  st.col_descr AS col_descr
+FROM zp_dm_aso_ddpp_kdb.arch_datamap_stg_catalog_datasets AS ds
+  JOIN zp_dm_aso_ddpp_kdb.arch_datamap_stg_iportal_dm_struct AS st
+    ON ds.ds_name = st.dm_name
 WHERE ds.data_status = 'Активный'
 ORDER BY ds.ds_id

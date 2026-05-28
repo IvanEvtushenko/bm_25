@@ -31,7 +31,9 @@ def _spark_iter(sql: str, app_name: str = "bm25_ingest") -> Iterator[dict]:
     """Выполнить SQL в Spark, выдавать строки результата как dict-ы.
 
     Используется toLocalIterator(): партиции тянутся в driver по одной,
-    весь датафрейм в RAM не загружается. Подходит для прод-объёмов.
+    весь датафрейм в RAM не загружается. После полного обхода (или
+    исключения) сессия Spark корректно останавливается — это закрывает
+    JVM-процесс и убирает временные файлы Spark в /tmp.
     """
     try:
         from pyspark.sql import SparkSession
@@ -44,10 +46,15 @@ def _spark_iter(sql: str, app_name: str = "bm25_ingest") -> Iterator[dict]:
     spark = SparkSession.builder.appName(app_name).enableHiveSupport().getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
 
-    df = spark.sql(sql)
-    columns = df.columns
-    for row in df.toLocalIterator():
-        yield {col: row[col] for col in columns}
+    try:
+        df = spark.sql(sql)
+        columns = df.columns
+        for row in df.toLocalIterator():
+            yield {col: row[col] for col in columns}
+    finally:
+        # Закрываем сессию — иначе JVM может «висеть» при крэше и оставлять
+        # после себя файлы в /tmp/blockmgr-*, /tmp/spark-*.
+        spark.stop()
 
 
 @dataclass
