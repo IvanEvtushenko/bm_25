@@ -29,7 +29,8 @@ from .index import BM25Index, DEFAULT_B, DEFAULT_K1, INDEX_VERSION
 #   vocab.json      {лемма: column_index}
 #   doc_ids.json    порядок строк tf — какой doc_id на какой строке
 #   kinds.json      тип каждого документа (параллельно doc_ids)
-#   pub_ids.json    pub_id каждого документа (параллельно doc_ids)
+#   decision_ids.json  decision_id (id решения-владельца) каждого документа;
+#                      параллельно doc_ids
 #   meta.json       версия, N, vocab_size, avgdl, k1, b, fields_by_kind
 
 def save_index(index_dir: Path, index: BM25Index, offsets: np.ndarray | None = None) -> None:
@@ -48,8 +49,8 @@ def save_index(index_dir: Path, index: BM25Index, offsets: np.ndarray | None = N
     (index_dir / "kinds.json").write_text(
         json.dumps(index.kinds, ensure_ascii=False), encoding="utf-8"
     )
-    (index_dir / "pub_ids.json").write_text(
-        json.dumps(index.pub_ids, ensure_ascii=False), encoding="utf-8"
+    (index_dir / "decision_ids.json").write_text(
+        json.dumps(index.decision_ids, ensure_ascii=False), encoding="utf-8"
     )
     meta = {
         "version": INDEX_VERSION,
@@ -80,12 +81,12 @@ def load_index(index_dir: Path) -> BM25Index:
     vocab = json.loads((index_dir / "vocab.json").read_text(encoding="utf-8"))
     doc_ids = json.loads((index_dir / "doc_ids.json").read_text(encoding="utf-8"))
     kinds = json.loads((index_dir / "kinds.json").read_text(encoding="utf-8"))
-    pub_ids = json.loads((index_dir / "pub_ids.json").read_text(encoding="utf-8"))
+    decision_ids = json.loads((index_dir / "decision_ids.json").read_text(encoding="utf-8"))
     return BM25Index(
         vocab=vocab,
         doc_ids=doc_ids,
         kinds=kinds,
-        pub_ids=pub_ids,
+        decision_ids=decision_ids,
         tf=tf,
         doc_lens=doc_lens,
         df=df,

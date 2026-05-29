@@ -16,14 +16,16 @@ from typing import Iterator
 # Что не в этом списке — отбрасывается при чтении CSV (например, технические
 # колонки Показатели.csv типа "Является ли элемент информативным (служ.)").
 DECISION_CSV_FIELDS = (
-    "pub_id", "name", "business_description", "keywords",
+    "decision_id", "name", "business_description", "keywords",
     "parent_dataset", "frequency", "first_timestamp", "basis_document", "comments",
 )
-ATTRIBUTE_CSV_FIELDS = ("pub_id", "report_name", "name", "description", "type")
+ATTRIBUTE_CSV_FIELDS = ("decision_id", "report_name", "name", "description", "type")
 
-# Маппинг исходных CSV-колонок (с длинными русскими именами) в канонические.
-# Применяется ДО фильтрации по CSV_FIELDS.
+# Маппинг исходных CSV-колонок (с длинными русскими именами или старыми
+# идентификаторами вроде pub_id) в канонические. Применяется ДО фильтрации
+# по CSV_FIELDS — так исходные файлы данных не нужно править.
 CSV_COLUMN_ALIAS = {
+    "pub_id": "decision_id",
     "Тип элемента состава набора данных": "type",
 }
 
@@ -47,7 +49,7 @@ class CSVSource:
 
     Использование:
         src = CSVSource(Path("pub_report.csv"))
-        for row in src.iter_rows():        # row уже с pub_id и canonical именами
+        for row in src.iter_rows():        # row уже с decision_id и canonical именами
             ...
         print(src.kind())                  # 'decision' / 'attribute'
     """
@@ -81,8 +83,11 @@ class CSVSource:
                 for csv_name, canonical in CSV_COLUMN_ALIAS.items():
                     if csv_name in row and canonical not in row:
                         row[canonical] = row.pop(csv_name)
-                # pub_id может прийти с BOM-префиксом, если encoding оплошал.
-                if "pub_id" not in row and "﻿pub_id" in row:
-                    row["pub_id"] = row.pop("﻿pub_id")
+                # decision_id может прийти с BOM-префиксом, если encoding оплошал.
+                # Это происходит после применения alias `pub_id` → `decision_id`,
+                # но если в CSV исходно было `﻿pub_id` — alias не сработал.
+                for stale in ("﻿pub_id", "﻿decision_id"):
+                    if stale in row and "decision_id" not in row:
+                        row["decision_id"] = row.pop(stale)
                 # Фильтруем только канонические колонки. Прочие выкидываются.
                 yield {k: row.get(k, "") for k in canonical_fields}

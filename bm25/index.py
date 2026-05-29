@@ -34,7 +34,7 @@ import numpy as np
 from scipy.sparse import csc_matrix, csr_matrix
 
 
-INDEX_VERSION = 5
+INDEX_VERSION = 6
 DEFAULT_K1 = 1.5
 DEFAULT_B = 0.75
 
@@ -46,12 +46,12 @@ class BM25Index:
     vocab: dict[str, int]
     # ID документов в порядке строк tf. doc_ids[i] = id i-го документа.
     doc_ids: list[str]
-    # Тип каждого документа (publication / element); параллельно doc_ids.
+    # Тип каждого документа (decision / attribute); параллельно doc_ids.
     kinds: list[str]
-    # pub_id-владелец каждого документа; параллельно doc_ids.
-    # Нужен для масок типа "элементы только из других публикаций" в coverage,
-    # чтобы не лазить за этим в documents (тяжело при ленивой загрузке).
-    pub_ids: list[str]
+    # decision_id (= идентификатор решения-владельца) каждого документа;
+    # параллельно doc_ids. Нужен для масок типа «атрибуты только других решений»
+    # в coverage, чтобы не лазить за этим в documents (тяжело при ленивой загрузке).
+    decision_ids: list[str]
     # tf[i, j] = частота термина j в документе i.
     tf: csr_matrix
     # Длины документов в токенах, int32[N].

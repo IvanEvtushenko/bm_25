@@ -5,9 +5,13 @@
 строки/группы в документ и сборка индекса. Никаких CSV-vs-SQL веток.
 
 ТЕРМИНОЛОГИЯ:
-  Решение (decision)  — kind="decision", doc_id="dec:<pub_id>"
-  Атрибут (attribute) — kind="attribute", doc_id="attr:<pub_id>#g<group_idx>"
-                                              или "attr:<pub_id>#<row_idx>" без группировки
+  Решение (decision)  — kind="decision", doc_id="dec:<decision_id>"
+  Атрибут (attribute) — kind="attribute",
+                        doc_id="attr:<decision_id>#g<group_idx>" (группа),
+                        либо "attr:<decision_id>#<row_idx>" (без группировки).
+  decision_id         — идентификатор решения. У документа kind="decision"
+                        совпадает с его собственным id; у документа
+                        kind="attribute" — id родительского решения.
 
 ПРАВИЛО ИНДЕКСАЦИИ:
   В _doc_text идут ВСЕ строковые поля документа, кроме INDEX_BLACKLIST.
@@ -30,7 +34,7 @@ from .tokenizer import Tokenizer
 # ─── Что НЕ индексируется ───────────────────────────────────────────────────
 INDEX_BLACKLIST = frozenset({
     # Служебные поля документа (выставляются нашим кодом)
-    "doc_id", "kind", "pub_id", "n_elements", "element_names",
+    "doc_id", "kind", "decision_id", "n_elements", "element_names",
     # Идентификаторы и категориальные, общие для всех источников
     "id", "owner", "type",
     # Служебные метаданные decision (не индексируются)
@@ -44,24 +48,27 @@ INDEX_BLACKLIST = frozenset({
 DECISION_LEVEL_FIELDS_IN_GROUP = frozenset({"report_name"})
 
 
-# ─── Универсальные строитель документов ─────────────────────────────────────
+# ─── Универсальные строители документов ─────────────────────────────────────
 
-def _pub_id_of(row: dict) -> str:
-    """Достать pub_id из строки источника. Источник уже привёл колонку к
-    канонической форме, но для SQL-результата pub_id лежит в поле `id`."""
-    raw = row.get("pub_id") or row.get("id")
+def _decision_id_of(row: dict) -> str:
+    """Достать decision_id из строки источника.
+
+    Источник уже привёл колонку к канонической форме, но для SQL-результата
+    decision_id лежит в поле `id` (как алиас `ds_id AS id` в SQL).
+    """
+    raw = row.get("decision_id") or row.get("id")
     if raw is None:
-        raise ValueError(f"row missing pub_id/id: {row}")
+        raise ValueError(f"row missing decision_id/id: {row}")
     return str(raw)
 
 
-def _doc_id(kind: str, pub_id: str, *, row_idx: int | None = None, group_idx: int | None = None) -> str:
+def _doc_id(kind: str, decision_id: str, *, row_idx: int | None = None, group_idx: int | None = None) -> str:
     if kind == "decision":
-        return f"dec:{pub_id}"
+        return f"dec:{decision_id}"
     if kind == "attribute":
         if group_idx is not None:
-            return f"attr:{pub_id}#g{group_idx}"
-        return f"attr:{pub_id}#{row_idx}"
+            return f"attr:{decision_id}#g{group_idx}"
+        return f"attr:{decision_id}#{row_idx}"
     raise ValueError(f"unknown kind: {kind!r}")
 
 
@@ -69,18 +76,18 @@ def normalize_row(row: dict, kind: str, row_idx: int) -> dict:
     """Одна строка источника → один документ (без группировки).
 
     Все поля row сохраняются как есть (источник уже отфильтровал/переименовал
-    под канонические имена). Сверху выставляем служебные doc_id/kind/pub_id.
+    под канонические имена). Сверху выставляем служебные doc_id/kind/decision_id.
     """
-    pub_id = _pub_id_of(row)
+    decision_id = _decision_id_of(row)
     out: dict = {k: (v if v is not None else "") for k, v in row.items() if k != "id"}
-    out["pub_id"] = pub_id
+    out["decision_id"] = decision_id
     out["kind"] = kind
-    out["doc_id"] = _doc_id(kind, pub_id, row_idx=row_idx)
+    out["doc_id"] = _doc_id(kind, decision_id, row_idx=row_idx)
     return out
 
 
-def normalize_group(group_rows: list[dict], kind: str, pub_id: str, group_idx: int) -> dict:
-    """N подряд идущих строк одного pub_id → один документ-группа.
+def normalize_group(group_rows: list[dict], kind: str, decision_id: str, group_idx: int) -> dict:
+    """N подряд идущих строк одного decision_id → один документ-группа.
 
     Каждая колонка group_rows сохраняется как list[str] длины n_elements —
     по одному значению на каждую строку в группе. Это даёт гомогенный формат
@@ -94,16 +101,16 @@ def normalize_group(group_rows: list[dict], kind: str, pub_id: str, group_idx: i
     if not group_rows:
         raise ValueError("normalize_group: empty group")
     out: dict = {
-        "pub_id": pub_id,
+        "decision_id": decision_id,
         "kind": kind,
-        "doc_id": _doc_id(kind, pub_id, group_idx=group_idx),
+        "doc_id": _doc_id(kind, decision_id, group_idx=group_idx),
         "n_elements": len(group_rows),
     }
     # Собираем все колонки из всех строк (на случай разных схем; обычно одинаковые).
     columns = set()
     for r in group_rows:
         columns.update(r.keys())
-    SKIP = {"doc_id", "kind", "pub_id", "n_elements", "id"}
+    SKIP = {"doc_id", "kind", "decision_id", "n_elements", "id"}
     for col in columns:
         if col in SKIP:
             continue
@@ -117,8 +124,8 @@ def normalize_group(group_rows: list[dict], kind: str, pub_id: str, group_idx: i
             ]
 
     # Для kind=attribute name дублируем как "A | B | C" — это удобнее для
-    # отображения в выдаче, чем чистый list. _doc_text всё равно индексирует
-    # обе формы (через `element_names` в SKIP'е — only one of them).
+    # отображения в выдаче, чем чистый list. element_names в INDEX_BLACKLIST,
+    # поэтому двойной индексации одного и того же не будет.
     if kind == "attribute" and "name" in out:
         names_list = out["name"]
         out["element_names"] = names_list
@@ -127,37 +134,37 @@ def normalize_group(group_rows: list[dict], kind: str, pub_id: str, group_idx: i
 
 
 def iter_grouped(rows: Iterable[dict], kind: str, group_size: int) -> Iterator[dict]:
-    """Группирует строки по pub_id в чанки по group_size.
+    """Группирует строки по decision_id в чанки по group_size.
 
     Работает одинаково для любого источника — нужно лишь, чтобы строки
-    одного pub_id шли подряд (CSV нативно, SQL — ORDER BY).
+    одного decision_id шли подряд (CSV нативно, SQL — ORDER BY).
     """
     if group_size < 1:
         raise ValueError(f"group_size must be >= 1, got {group_size}")
 
     buffer: list[dict] = []
-    buffer_pub_id: str | None = None
-    group_idx_by_pub: dict[str, int] = {}
+    buffer_decision_id: str | None = None
+    group_idx_by_decision: dict[str, int] = {}
 
     def flush() -> dict | None:
-        nonlocal buffer, buffer_pub_id
+        nonlocal buffer, buffer_decision_id
         if not buffer:
             return None
-        gi = group_idx_by_pub.get(buffer_pub_id, 0)
-        group_idx_by_pub[buffer_pub_id] = gi + 1
-        doc = normalize_group(buffer, kind, buffer_pub_id, gi)
+        gi = group_idx_by_decision.get(buffer_decision_id, 0)
+        group_idx_by_decision[buffer_decision_id] = gi + 1
+        doc = normalize_group(buffer, kind, buffer_decision_id, gi)
         buffer = []
-        buffer_pub_id = None
+        buffer_decision_id = None
         return doc
 
     for row in rows:
-        pub_id = _pub_id_of(row)
-        if buffer_pub_id is not None and pub_id != buffer_pub_id:
+        decision_id = _decision_id_of(row)
+        if buffer_decision_id is not None and decision_id != buffer_decision_id:
             doc = flush()
             if doc is not None:
                 yield doc
         buffer.append(row)
-        buffer_pub_id = pub_id
+        buffer_decision_id = decision_id
         if len(buffer) >= group_size:
             doc = flush()
             if doc is not None:
@@ -208,7 +215,7 @@ def _build_core(
     vocab: dict[str, int] = {}
     doc_ids: list[str] = []
     kinds: list[str] = []
-    pub_ids: list[str] = []
+    decision_ids: list[str] = []
     doc_lens: list[int] = []
     rows_buf: list[int] = []
     cols_buf: list[int] = []
@@ -227,7 +234,7 @@ def _build_core(
             vals_buf.append(cnt)
         doc_ids.append(doc["doc_id"])
         kinds.append(doc["kind"])
-        pub_ids.append(str(doc.get("pub_id", "")))
+        decision_ids.append(str(doc.get("decision_id", "")))
         doc_lens.append(len(tokens))
 
     N = len(doc_ids)
@@ -242,7 +249,7 @@ def _build_core(
         vocab=vocab,
         doc_ids=doc_ids,
         kinds=kinds,
-        pub_ids=pub_ids,
+        decision_ids=decision_ids,
         tf=tf,
         doc_lens=np.asarray(doc_lens, dtype=np.int32),
         df=df,

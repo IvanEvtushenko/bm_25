@@ -12,10 +12,10 @@
     python query.py --kind attribute --top-k 10 "q"   только среди атрибутов
 
   По решению (sanity-check «найди похожие на 3571»):
-    python query.py --like-pub 3571                   все атрибуты решения 3571
+    python query.py --like-decision 3571              все атрибуты решения 3571
                                                       склеиваются в один запрос;
                                                       решение маскируется;
-                                                      выдача группируется по pub_id.
+                                                      выдача группируется по decision_id.
 
   С фильтром по типу атрибута (поле `type` в SQL):
     python query.py "инфляция" --search-among Витрина Форма
@@ -62,7 +62,7 @@ def show(query: str, results) -> None:
             report = doc.get("report_name", "")
             if report:
                 title = f"{report} :: {title}"
-        print(f"  {score_:6.2f}  [{kind_tag}|{doc.get('pub_id', '?')}] {title}")
+        print(f"  {score_:6.2f}  [{kind_tag}|{doc.get('decision_id', '?')}] {title}")
 
 
 def build_type_mask(searcher, allowed_types: list[str]) -> np.ndarray:
@@ -70,10 +70,6 @@ def build_type_mask(searcher, allowed_types: list[str]) -> np.ndarray:
 
     Сравнение case-insensitive. Поле `type` может быть str (одиночный атрибут)
     или list[str] (группа). Документы без `type` отсекаются.
-
-    Реализация: один проход по docs.jsonl. Порядок строк JSONL совпадает с
-    порядком doc_ids в индексе по построению (см. build_streaming_from_jsonl),
-    но на всякий случай маппим через doc_id.
     """
     wanted = {t.strip().lower() for t in allowed_types if t.strip()}
     n = searcher.index.n_docs
@@ -92,12 +88,14 @@ def build_type_mask(searcher, allowed_types: list[str]) -> np.ndarray:
     return mask
 
 
-def search_like_pub(searcher, target_pub_id: str, top_k: int, type_mask=None) -> list[tuple[float, dict]]:
+def search_like_decision(
+    searcher, target_decision_id: str, top_k: int, type_mask=None,
+) -> list[tuple[float, dict]]:
     """Поиск похожих решений «как X»: все атрибуты X — один большой запрос."""
-    pub_ids = np.asarray(searcher.index.pub_ids)
-    target_rows = np.flatnonzero(pub_ids == target_pub_id)
+    decision_ids = np.asarray(searcher.index.decision_ids)
+    target_rows = np.flatnonzero(decision_ids == target_decision_id)
     if target_rows.size == 0:
-        print(f"no documents with pub_id={target_pub_id!r}", file=sys.stderr)
+        print(f"no documents with decision_id={target_decision_id!r}", file=sys.stderr)
         return []
 
     parts = []
@@ -111,7 +109,7 @@ def search_like_pub(searcher, target_pub_id: str, top_k: int, type_mask=None) ->
         return []
     scores = bm25_score(searcher.index, q_tokens)
     # Маскируем target и (опционально) применяем type-фильтр.
-    keep = (pub_ids != target_pub_id)
+    keep = (decision_ids != target_decision_id)
     if type_mask is not None:
         keep = keep & type_mask
     scores = np.where(keep, scores, 0.0)
@@ -120,15 +118,15 @@ def search_like_pub(searcher, target_pub_id: str, top_k: int, type_mask=None) ->
     if nz.size == 0:
         return []
 
-    # Группировка по pub_id: один лучший документ на каждое соседнее решение.
-    best_per_pub: dict[str, tuple[float, int]] = {}
+    # Группировка по decision_id: один лучший документ на каждое соседнее решение.
+    best_per_decision: dict[str, tuple[float, int]] = {}
     for i in nz:
-        pid = pub_ids[i]
-        cur = best_per_pub.get(pid)
+        did = decision_ids[i]
+        cur = best_per_decision.get(did)
         if cur is None or scores[i] > cur[0]:
-            best_per_pub[pid] = (float(scores[i]), int(i))
+            best_per_decision[did] = (float(scores[i]), int(i))
 
-    ranked = sorted(best_per_pub.values(), key=lambda x: x[0], reverse=True)[:top_k]
+    ranked = sorted(best_per_decision.values(), key=lambda x: x[0], reverse=True)[:top_k]
     return [(s, searcher.documents[searcher.index.doc_ids[i]]) for s, i in ranked]
 
 
@@ -143,9 +141,9 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument(
-        "--like-pub", type=str, default=None, metavar="PUB_ID",
-        help="режим поиска похожих: использует все атрибуты pub_id=PUB_ID как "
-             "большой запрос, маскирует само решение, группирует выдачу по pub_id",
+        "--like-decision", type=str, default=None, metavar="DECISION_ID",
+        help="режим поиска похожих: использует все атрибуты decision_id=DECISION_ID "
+             "как большой запрос, маскирует само решение, группирует выдачу по decision_id",
     )
     parser.add_argument(
         "--search-among", nargs="+", default=None, metavar="TYPE",
@@ -171,18 +169,18 @@ def main(argv: list[str]) -> int:
         type_mask = build_type_mask(searcher, args.search_among)
         print(f"--search-among {args.search_among}: {int(type_mask.sum())} documents pass filter")
 
-    if args.like_pub is not None:
-        results = search_like_pub(searcher, args.like_pub, top_k=args.top_k, type_mask=type_mask)
-        show(f"like-pub:{args.like_pub}", results)
+    if args.like_decision is not None:
+        results = search_like_decision(
+            searcher, args.like_decision, top_k=args.top_k, type_mask=type_mask,
+        )
+        show(f"like-decision:{args.like_decision}", results)
         return 0
 
     queries = args.queries or SMOKE_QUERIES
     for q in queries:
-        # Текстовый поиск через Searcher.search, плюс ручное применение type_mask.
         if type_mask is None:
             results = searcher.search(q, top_k=args.top_k, kind=args.kind)
         else:
-            # Дублируем логику searcher.search, но с маской.
             q_tokens = searcher.tokenizer(q)
             if not q_tokens:
                 results = []
